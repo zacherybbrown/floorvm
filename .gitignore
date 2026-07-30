@@ -1,5 +1,12 @@
 *.from
 
+# Generated media & saves
+*.fvd
+*.sav
+
+# Python
+__pycache__/
+
 # C
 build/
 

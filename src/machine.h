@@ -3,22 +3,40 @@
 
 #define TARGET_FPS 60
 #define NS_PER_FRAME (1000000000ULL / TARGET_FPS)
-#define CYCLES_PER_FRAME 16666
 
-#define SCREEN_WIDTH 40
-#define SCREEN_HEIGHT 30
+// v2 console runs a much larger framebuffer (100x100 = 10,000 px vs. the old
+// 40x30 = 1,200 px), so the per-frame cycle budget is scaled up to keep a full
+// clear + redraw comfortably inside a single frame.
+#define CYCLES_PER_FRAME 200000
+
+#define SCREEN_WIDTH 100
+#define SCREEN_HEIGHT 100
 #define REGISTERS_COUNT 16
+
+// Video modes (written to the memory-mapped VMODE register)
+#define VMODE_DIRECT 0  // Each VRAM byte is a direct RGB332 color (RRRGGGBB)
+#define VMODE_PALETTE 1 // Each VRAM byte indexes the 256-entry RGB palette
+
+#define PALETTE_ENTRIES 256
 
 #define PROGRAM_SIZE 8192
 #define VRAM_SIZE (SCREEN_WIDTH * SCREEN_HEIGHT)
+#define PALETTE_SIZE (PALETTE_ENTRIES * 3)
+#define VMODE_SIZE 1
 #define INPUT_SIZE 1
+#define SAVECTL_SIZE 1
+#define SRAM_SIZE 4096
 #define USER_SIZE 4096
-#define RAM_SIZE (PROGRAM_SIZE + VRAM_SIZE + INPUT_SIZE + USER_SIZE)
+#define RAM_SIZE (PROGRAM_SIZE + VRAM_SIZE + PALETTE_SIZE + VMODE_SIZE + INPUT_SIZE + SAVECTL_SIZE + SRAM_SIZE + USER_SIZE)
 
 #define PROGRAM_START 0
 #define VRAM_START PROGRAM_SIZE
-#define INPUT_START (VRAM_START + VRAM_SIZE)
-#define USER_START (INPUT_START + INPUT_SIZE)
+#define PALETTE_START (VRAM_START + VRAM_SIZE)
+#define VMODE_START (PALETTE_START + PALETTE_SIZE)
+#define INPUT_START (VMODE_START + VMODE_SIZE)
+#define SAVECTL_START (INPUT_START + INPUT_SIZE)
+#define SRAM_START (SAVECTL_START + SAVECTL_SIZE)
+#define USER_START (SRAM_START + SRAM_SIZE)
 
 // Button Bitmasks (0=released,1=pressed)
 #define BTN_UP (1 << 0)     // 0x01 (Bit 0)
@@ -86,5 +104,10 @@ typedef struct
 Machine machine_init();
 
 void machine_reset(Machine *machine);
+
+// Writes the built-in default palette into the palette region. The default is
+// the RGB332 identity ramp, so an untouched palette in VMODE_PALETTE renders
+// identically to VMODE_DIRECT until the program overwrites entries.
+void machine_load_default_palette(Machine *machine);
 
 void machine_step(Machine *machine);

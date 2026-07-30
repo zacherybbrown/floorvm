@@ -10,53 +10,111 @@ A lightweight, high-efficiency virtual machine with a variable-length byte-strea
 
 ### System specs
 
-| Component              | Value / Specification                          |
-|------------------------|------------------------------------------------|
-| **Target frame rate**  | 60 FPS (CYCLES_PER_FRAME = 16,666)             |
-| **Display resolution** | 40 × 30 pixels (1.2KB total VRAM)              |
-| **Registers**          | 16 general-purpose 32-bit registers (r0 – r15) |
-| **Program counter**    | Unsigned 16-bit integer (pc)                   |
-| **Endianness**         | Big-endian                                     |
-| **Total memory**       | 13,489 bytes (13.17 KiB)                       |
+| Component              | Value / Specification                                |
+|------------------------|------------------------------------------------------|
+| **Target frame rate**  | 60 FPS (CYCLES_PER_FRAME = 200,000)                  |
+| **Display resolution** | 100 × 100 pixels (10 KB VRAM, 1 byte per pixel)      |
+| **Color**              | 256-entry RGB palette, or direct RGB332 (see below)  |
+| **Registers**          | 16 general-purpose 32-bit registers (r0 – r15)       |
+| **Program counter**    | Unsigned 16-bit integer (pc)                         |
+| **Endianness**         | Big-endian                                           |
+| **Persistent save**    | 4 KB SRAM (battery-backed, per program)              |
+| **Total memory**       | 27,155 bytes (≈26.5 KiB)                             |
 
 ---
 
 ## Unified memory map
 
-Memory is mapped into four distinct linear segments across a continuous byte array:
+Memory is mapped into linear segments across a continuous byte array:
 
-| Bounds              | Name                       | Size   |
-|---------------------|----------------------------|--------|
-| `0x0000` - `0x1FFF` | Program ROM / Code segment | 8 KiB  |
-| `0x2000` - `0x24AF` | VRAM display buffer        | 1.2 KB |
-| `0x24B0`            | Input controller state     | 1 byte |
-| `0x24B1` - `0x34B0` | Safe user work RAM         | 4 KiB  |
+| Region             | Start (dec) | Start (hex) | Size    | Description                                            |
+|--------------------|-------------|-------------|---------|--------------------------------------------------------|
+| **Program ROM**    | 0           | `0x0000`    | 8 KiB   | Executable bytecode & embedded data assets             |
+| **VRAM buffer**    | 8192        | `0x2000`    | 10 KB   | 100 × 100 byte-addressable display buffer              |
+| **Palette**        | 18192       | `0x4710`    | 768 B   | 256 entries × 3 bytes (R, G, B)                        |
+| **Video mode**     | 18960       | `0x4A10`    | 1 byte  | `0` = direct RGB332, `1` = palette                     |
+| **Input**          | 18961       | `0x4A11`    | 1 byte  | Memory-mapped controller button bitmask                |
+| **Save control**   | 18962       | `0x4A12`    | 1 byte  | Write non-zero to flush SRAM to persistent storage     |
+| **SRAM (save)**    | 18963       | `0x4A13`    | 4 KiB   | Persistent per-program save data                       |
+| **User work RAM**  | 23059       | `0x5A13`    | 4 KiB   | General-purpose user-controlled free RAM               |
 
-### Memory Addresses & Offsets
+---
 
-| Region            | Start address (decimal) | Start address (hex) | Size   | Description                                   |
-|-------------------|-------------------------|---------------------|--------|-----------------------------------------------|
-| **Program ROM**   | 0                       | 0x0000              | 8 KiB  | Executable bytecode & embedded data assets    |
-| **VRAM buffer**   | 8192                    | 0x2000              | 1.2 KB | 40 x 30 byte-addressable display buffer       |
-| **Input byte**    | 9392                    | 0x24B0              | 1 byte | Memory-mapped controller button bitmask       |
-| **User work RAM** | 9393                    | 0x24B1              | 4 KiB  | General-purpose user-controlled free RAM      |
+## Color modes
+
+Each VRAM byte is one pixel. How the byte becomes a color depends on the **video-mode register** (address 18960):
+
+- **Direct mode (`0`, default):** the byte is a packed **RGB332** color — bits `RRRGGGBB`. No setup required; 256 fixed colors.
+- **Palette mode (`1`):** the byte is an **index** into the 256-entry palette at address 18192. Each entry is 3 bytes (R, G, B). Write your colors into the palette, set the mode to `1`, and every pixel value is looked up there.
+
+On reset the palette is initialized to the RGB332 identity ramp, so an untouched palette in palette mode looks identical to direct mode until you overwrite entries.
+
+```assembly
+; Palette mode: make color index 1 = pure red, then draw it at pixel (0,0)
+set8 r0 1
+store8 r0 18960     ; video mode = palette
+set8 r0 255
+store8 r0 18195     ; palette[1].R
+set8 r0 0
+store8 r0 18196     ; palette[1].G
+store8 r0 18197     ; palette[1].B
+set8 r0 1
+store8 r0 8192      ; VRAM pixel 0 -> palette index 1 (red)
+```
+
+---
+
+## Persistent saving (SRAM & disks)
+
+Programs persist data by writing to the **SRAM** region (address 18963, 4 KiB) and then writing a non-zero byte to the **save-control register** (address 18962). The emulator flushes SRAM to storage and clears the register. SRAM is also flushed automatically when the program exits.
+
+Where the save goes depends on how the program was launched:
+
+- **From a cartridge (`.from`):** saved to a sidecar file `<rom>.from.sav` next to the ROM.
+- **From a disk image (`.fvd`):** saved into that program's dedicated save area inside the image, like a real disk-based console.
+
+On boot, the matching save is loaded back into SRAM automatically.
+
+---
+
+## Bootloader & media
+
+FloorVM boots whatever you point it at:
+
+- **A `.from` file** — a single cartridge. Boots straight into the program.
+- **A directory** — every `.from` inside becomes a menu entry (saves go to `.sav` sidecars).
+- **A `.fvd` disk image** — multiple programs plus a per-program save area.
+
+For a directory or a disk, a simple **bootloader menu** lists the programs. Navigate with **Up/Down** and launch with **A** (or Return). Press **ESC** in a running program to return to the menu (or to quit a single cartridge).
+
+### Building a disk image
+
+`tools/mkdisk.py` packs ROMs into a `.fvd`:
+
+```bash
+python tools/mkdisk.py demo.fvd "programs/flappy.from=FLAPPY BIRD" programs/colorbars.from
+```
+
+An optional `"path=NAME"` sets the menu label (otherwise the filename stem is used).
 
 ---
 
 ## Controller input map
 
-Input is polled directly by reading the single memory-mapped byte at address 9392 (0x24B0). Bits represent button states (1=pressed,0=released):
+Input is polled by reading the single memory-mapped byte at address 18961 (0x4A11). Bits represent button states (1=pressed, 0=released):
 
-| Bit       | Mask (hex) | Flag constant | Button      | Emulator button |
-|-----------|------------|---------------|-------------|-----------------|
-| **Bit 0** | `0x01`     | BTN_UP        | D-Pad Up    | Up arrow        |
-| **Bit 1** | `0x02`     | BTN_DOWN      | D-Pad Down  | Down arrow      |
-| **Bit 2** | `0x04`     | BTN_LEFT      | D-Pad Left  | Left arrow      |
-| **Bit 3** | `0x08`     | BTN_RIGHT     | D-Pad Right | Right arrow     |
-| **Bit 4** | `0x10`     | BTN_A         | Button A    | A               |
-| **Bit 5** | `0x20`     | BTN_D         | Button D    | D               |
-| **Bit 6** | `0x40`     | BTN_SELECT    | Select      | Enter/return    |
-| **Bit 7** | `0x80`     | BTN_START     | Start       | Backspace       |
+| Bit       | Mask (hex) | Flag constant | Button      | Emulator key |
+|-----------|------------|---------------|-------------|--------------|
+| **Bit 0** | `0x01`     | BTN_UP        | D-Pad Up    | Up arrow     |
+| **Bit 1** | `0x02`     | BTN_DOWN      | D-Pad Down  | Down arrow   |
+| **Bit 2** | `0x04`     | BTN_LEFT      | D-Pad Left  | Left arrow   |
+| **Bit 3** | `0x08`     | BTN_RIGHT     | D-Pad Right | Right arrow  |
+| **Bit 4** | `0x10`     | BTN_A         | Button A    | A            |
+| **Bit 5** | `0x20`     | BTN_D         | Button D    | D            |
+| **Bit 6** | `0x40`     | BTN_SELECT    | Select      | Enter/Return |
+| **Bit 7** | `0x80`     | BTN_START     | Start       | Backspace    |
+
+**ESC** is handled by the console itself (return to boot menu / quit), not exposed to programs.
 
 ---
 
@@ -89,9 +147,13 @@ The ISA uses single-byte opcodes followed by inline variable-length operands.
 | `SET8`     | `0x19` | `reg value`      | Sets register to immediate byte value                              |
 | `COPY`     | `0x1A` | `reg target_reg` | Copies value from `reg` into `target_reg`                          |
 
+> **Note:** `SET32`/`SET8` immediates must be numbers, not labels. To use a data
+> label's address at runtime, place the data at a known fixed offset (see the
+> font trick in `programs/flappy.txt`).
+
 ### ALU instructions
 
-> **Note:** All ALU operations store the result into `target_reg`
+> **Note:** All ALU operations store the result into `target_reg`. `DIV` by zero yields `0`.
 
 | Opcode | Hex    | Operands                 | Operation                         |
 |--------|--------|--------------------------|-----------------------------------|
@@ -110,7 +172,7 @@ The ISA uses single-byte opcodes followed by inline variable-length operands.
 
 ## Assembler directives and syntax
 
-The Python assembler compiles `.asm` text files into ROMs padded to exactly 8 KiB.
+The Python assembler compiles `.asm`/`.txt` text files into ROMs padded to exactly 8 KiB. **One instruction per line.**
 
 ### Syntax Rules
 
@@ -130,27 +192,10 @@ The Python assembler compiles `.asm` text files into ROMs padded to exactly 8 Ki
 
 ---
 
-## Example program
+## Example programs
 
-```assembly
-#define VRAM 0x2000
-#define INPUT 0x24B0
-
-start:
-    SET32 r0 ${VRAM}   ; Loads VRAM base address into r0
-    SET8 r1 0xFF       ; Color value (full intensity)
-    STORE8 r1 ${VRAM}  ; Draws pixel at top-left corner (0,0)
-
-loop:
-    LOAD8 ${INPUT} r2        ; Reads controller button bitmask
-    SET8 r3 0x10             ; Bit 4 = BTN_A
-    AND r4 r2 r3             ; Checks if A is pressed
-    JMPNZ button_pressed r4  ; Jump if BTN_A is down
-    JMP loop                 ; Repeats main loop
-
-button_pressed:
-    HALT  ; Stops execution
-```
+* [`programs/flappy.txt`](programs/flappy.txt) — a full **Flappy Bird** in palette mode: gravity, scrolling pipes with pseudo-random gaps, scoring, and a high score saved to SRAM.
+* [`programs/colorbars.txt`](programs/colorbars.txt) — a palette rainbow demo.
 
 ---
 
@@ -158,28 +203,24 @@ button_pressed:
 
 ### Assembling code
 
-Run the assembler script to produce the target `.from` (FloorVM ROM) file:
-
 ```bash
-python assembler/main.py programs/paint.txt programs/paint.from
+python assembler/main.py programs/flappy.txt programs/flappy.from
 ```
 
 ### Testing with the VM
 
-This repository ships the latest build of the VM as a native executable for 5 platforms:
-
-- Windows on x86_64
-- Windows on ARM64
-- Linux on x86_64
-- Linux on ARM64
-- macOS, but only for Apple Silicon (ARM64)
-
-You can find the ZIPs and TARs containing these executables (potentially including necessary libraries placed next to the executable) on the [Releases](https://github.com/boyninja1555/floorvm/releases) tab. Every time we push an update, though, it publishes a new release. If your release doesn't work, you can download an earlier one!
+Prebuilt native executables for several platforms are published on the [Releases](https://github.com/boyninja1555/floorvm/releases) tab.
 
 ```bash
 # Windows
-.\FloorVM.exe programs\paint.from
+.\FloorVM.exe programs\flappy.from          # boot a cartridge
+.\FloorVM.exe demo.fvd                       # boot a disk (shows the menu)
+.\FloorVM.exe programs                       # boot a folder of ROMs (menu)
 
 # Linux/macOS
-./FloorVM programs/paint.from
+./FloorVM programs/flappy.from
 ```
+
+### Development helpers
+
+`tools/simvm.py` is a headless reference implementation of the machine used to test programs and render frames to PNG without SDL — handy for validating games during development.

@@ -1,18 +1,10 @@
 #include "input.h"
 #include <SDL3/SDL.h>
-#include "util.h"
 
 void input_poll(Machine *machine)
 {
     const bool *state = SDL_GetKeyboardState(NULL);
     u8 input_byte = 0;
-
-    if (state[SDL_SCANCODE_ESCAPE])
-    {
-        machine_reset(machine);
-        program_loadrom(machine);
-        return;
-    }
 
     if (state[SDL_SCANCODE_UP])
         input_byte |= BTN_UP;

@@ -32,6 +32,20 @@ u32 cp_u32(Machine *machine) // Consume program u32
            (u32)cp_byte(machine);
 }
 
+// Expands a 3-bit channel (0-7) to a full 8-bit value by bit-replication.
+static byte expand3(byte v3)
+{
+    v3 &= 0x07;
+    return (byte)((v3 << 5) | (v3 << 2) | (v3 >> 1));
+}
+
+// Expands a 2-bit channel (0-3) to a full 8-bit value by bit-replication.
+static byte expand2(byte v2)
+{
+    v2 &= 0x03;
+    return (byte)((v2 << 6) | (v2 << 4) | (v2 << 2) | v2);
+}
+
 // Public
 
 Machine machine_init()
@@ -39,12 +53,26 @@ Machine machine_init()
     return (Machine){0};
 }
 
+void machine_load_default_palette(Machine *machine)
+{
+    // Default palette == RGB332 identity: index i decodes exactly as it would
+    // in VMODE_DIRECT (RRRGGGBB). Programs overwrite entries as needed.
+    for (int i = 0; i < PALETTE_ENTRIES; i++)
+    {
+        u32 base = PALETTE_START + (u32)i * 3;
+        machine->ram[base + 0] = expand3((byte)(i >> 5));       // Red   (bits 7-5)
+        machine->ram[base + 1] = expand3((byte)(i >> 2));       // Green (bits 4-2)
+        machine->ram[base + 2] = expand2((byte)i);              // Blue  (bits 1-0)
+    }
+}
+
 void machine_reset(Machine *machine)
 {
     machine->status = MS_OK;
     memset(machine->ram, 0, RAM_SIZE);
     machine->pc = 0;
-    memset(machine->registers, 0, REGISTERS_COUNT);
+    memset(machine->registers, 0, sizeof(machine->registers));
+    machine_load_default_palette(machine);
 }
 
 void machine_step(Machine *machine)

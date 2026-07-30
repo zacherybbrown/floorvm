@@ -1,0 +1,79 @@
+; ============================================================================
+; COLORBARS - a FloorVM v2 palette demo (100x100)
+; Draws 8 horizontal rainbow bands using palette color mode, then idles.
+; A tiny showcase of the palette feature and the 100x100 framebuffer.
+; ============================================================================
+#define VRAM 8192
+#define VMODE 18960
+
+    ; --- palette entries 0..7 (rainbow) ---
+    set8 r0 230
+    store8 r0 18192
+    set8 r0 30
+    store8 r0 18193
+    set8 r0 30
+    store8 r0 18194        ; 0 red
+    set8 r0 240
+    store8 r0 18195
+    set8 r0 140
+    store8 r0 18196
+    set8 r0 30
+    store8 r0 18197        ; 1 orange
+    set8 r0 240
+    store8 r0 18198
+    set8 r0 230
+    store8 r0 18199
+    set8 r0 40
+    store8 r0 18200        ; 2 yellow
+    set8 r0 60
+    store8 r0 18201
+    set8 r0 200
+    store8 r0 18202
+    set8 r0 70
+    store8 r0 18203        ; 3 green
+    set8 r0 40
+    store8 r0 18204
+    set8 r0 170
+    store8 r0 18205
+    set8 r0 220
+    store8 r0 18206        ; 4 cyan
+    set8 r0 40
+    store8 r0 18207
+    set8 r0 80
+    store8 r0 18208
+    set8 r0 220
+    store8 r0 18209        ; 5 blue
+    set8 r0 130
+    store8 r0 18210
+    set8 r0 60
+    store8 r0 18211
+    set8 r0 210
+    store8 r0 18212        ; 6 violet
+    set8 r0 235
+    store8 r0 18213
+    set8 r0 90
+    store8 r0 18214
+    set8 r0 190
+    store8 r0 18215        ; 7 pink
+
+    set8 r0 1
+    store8 r0 ${VMODE}     ; palette mode
+
+    ; --- fill: color index = (y / 13), y = i / 100 ---
+    set32 r1 0            ; i = pixel index 0..9999
+    set32 r2 ${VRAM}      ; current address
+    set32 r3 1            ; constant 1
+    set32 r4 100          ; width
+    set32 r5 13           ; band height
+fill:
+    div r6 r1 r4         ; y = i / 100
+    div r7 r6 r5         ; band = y / 13
+    store8p r7 r2        ; plot
+    add r2 r2 r3
+    add r1 r1 r3
+    set32 r8 10000
+    sub r9 r8 r1
+    jmpnz fill r9
+
+idle:
+    jmp idle

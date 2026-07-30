@@ -1,0 +1,545 @@
+; ============================================================================
+; FLAPPY BIRD for FloorVM v2 (100x100, palette color mode)
+; ----------------------------------------------------------------------------
+;   A / Up / Return  -> flap (also starts the game, and restarts after death)
+;   ESC              -> back to boot menu
+;   High score is persisted to SRAM (a .sav sidecar, or the disk save area).
+;
+; The bird X is fixed; pipes scroll left with pseudo-random gaps. Physics uses
+; 1/16-pixel fixed point. State: 0 = ready, 1 = playing, 2 = dead.
+; ============================================================================
+
+; ---- Memory-mapped hardware (see src/machine.h) ----
+#define VRAM 8192
+#define GROUND 17692      ; VRAM + 95*100  (top of the ground band)
+#define VMODE 18960
+#define INPUT 18961
+#define SAVECTL 18962
+#define HISCORE 18963     ; SRAM base
+
+; ---- Game variables (user RAM) ----
+#define BIRDY 23059       ; bird Y in 1/16-pixel fixed point
+#define VEL 23063         ; vertical velocity (two's complement)
+#define SCORE 23067
+#define STATE 23071       ; 0 ready, 1 play, 2 dead
+#define RNG 23075
+#define PREVA 23079       ; previous A-button bits (edge detection)
+#define FRAMES 23083
+; pipe records: 12 bytes each -> X, GAP(top), SCORED
+#define PIPEBASE 23087
+#define P0X 23087
+#define P0GAP 23091
+#define P0SC 23095
+#define P1X 23099
+#define P1GAP 23103
+#define P1SC 23107
+#define BPX 23111         ; cached bird Y in whole pixels
+#define DIGITS 23115      ; 3 x u32: hundreds, tens, ones
+#define DIGIT1 23119
+#define DIGIT2 23123
+
+; ---- Constants ----
+#define FONT 5            ; digit font lives at fixed ROM offset 5 (see below)
+#define SIGN 0x80000000
+#define BTNA 16           ; BTN_A bitmask
+#define BIRDX 25
+#define GRAVITY 3
+#define FLAP 42
+#define GAPH 32
+#define DELAY 73800       ; frame pacing (calibrated ~1 iteration / rendered frame)
+
+; ---------------------------------------------------------------------------
+; A 5-byte JMP keeps the digit font at a fixed, known offset (5) so it can be
+; addressed by immediate, which SET32 requires (labels aren't allowed there).
+; ---------------------------------------------------------------------------
+    jmp init_all
+
+digitfont:
+    .BYTE 7 5 5 5 7    ; 0
+    .BYTE 2 6 2 2 7    ; 1
+    .BYTE 6 1 2 4 7    ; 2
+    .BYTE 7 1 3 1 7    ; 3
+    .BYTE 5 5 7 1 1    ; 4
+    .BYTE 7 4 7 1 7    ; 5
+    .BYTE 3 4 7 5 7    ; 6
+    .BYTE 7 1 2 2 2    ; 7
+    .BYTE 7 5 7 5 7    ; 8
+    .BYTE 7 5 7 1 6    ; 9
+
+; ===========================================================================
+; One-time setup: palette + video mode + rng seed
+; ===========================================================================
+init_all:
+    ; Palette entry 0: sky (135,206,235)
+    set8 r0 135
+    store8 r0 18192
+    set8 r0 206
+    store8 r0 18193
+    set8 r0 235
+    store8 r0 18194
+    ; entry 1: pipe green (40,170,60)
+    set8 r0 40
+    store8 r0 18195
+    set8 r0 170
+    store8 r0 18196
+    set8 r0 60
+    store8 r0 18197
+    ; entry 2: bird yellow (255,210,0)
+    set8 r0 255
+    store8 r0 18198
+    set8 r0 210
+    store8 r0 18199
+    set8 r0 0
+    store8 r0 18200
+    ; entry 3: ground (210,180,100)
+    set8 r0 210
+    store8 r0 18201
+    set8 r0 180
+    store8 r0 18202
+    set8 r0 100
+    store8 r0 18203
+    ; entry 4: white (255,255,255)
+    set8 r0 255
+    store8 r0 18204
+    set8 r0 255
+    store8 r0 18205
+    set8 r0 255
+    store8 r0 18206
+    ; entry 5: red (220,50,40)
+    set8 r0 220
+    store8 r0 18207
+    set8 r0 50
+    store8 r0 18208
+    set8 r0 40
+    store8 r0 18209
+    ; palette mode
+    set8 r0 1
+    store8 r0 ${VMODE}
+    ; seed rng (0x12345678)
+    set32 r0 305419896
+    store32 r0 ${RNG}
+
+; ===========================================================================
+; Fresh game -> READY state
+; ===========================================================================
+init_game:
+    set32 r0 800
+    store32 r0 ${BIRDY}
+    set32 r0 50
+    store32 r0 ${BPX}
+    set32 r0 0
+    store32 r0 ${VEL}
+    set32 r0 0
+    store32 r0 ${SCORE}
+    set32 r0 0
+    store32 r0 ${STATE}
+    set32 r0 0
+    store32 r0 ${PREVA}
+    set32 r0 95
+    store32 r0 ${P0X}
+    set32 r0 40
+    store32 r0 ${P0GAP}
+    set32 r0 0
+    store32 r0 ${P0SC}
+    set32 r0 150
+    store32 r0 ${P1X}
+    set32 r0 28
+    store32 r0 ${P1GAP}
+    set32 r0 0
+    store32 r0 ${P1SC}
+    jmp frame_top
+
+; ===========================================================================
+; MAIN LOOP
+; ===========================================================================
+frame_top:
+    ; frame counter
+    load32 ${FRAMES} r0
+    set32 r1 1
+    add r0 r0 r1
+    store32 r0 ${FRAMES}
+
+    ; advance rng (xorshift32)
+    load32 ${RNG} r0
+    set32 r2 13
+    shl r1 r0 r2
+    xor r0 r0 r1
+    set32 r2 17
+    shr r1 r0 r2
+    xor r0 r0 r1
+    set32 r2 5
+    shl r1 r0 r2
+    xor r0 r0 r1
+    store32 r0 ${RNG}
+
+    ; --- A-button rising edge -> flap ---
+    load8 ${INPUT} r3
+    set8 r4 ${BTNA}
+    and r5 r3 r4
+    load32 ${PREVA} r6
+    store32 r5 ${PREVA}
+    jmpiz after_flap r5
+    jmpnz after_flap r6
+
+    load32 ${STATE} r7
+    jmpiz fl_start r7
+    set32 r8 2
+    sub r9 r7 r8
+    jmpiz init_game r9
+    ; playing -> apply impulse
+    set32 r0 0
+    set32 r1 ${FLAP}
+    sub r0 r0 r1
+    store32 r0 ${VEL}
+    jmp after_flap
+
+fl_start:
+    set32 r0 1
+    store32 r0 ${STATE}
+    set32 r0 0
+    set32 r1 ${FLAP}
+    sub r0 r0 r1
+    store32 r0 ${VEL}
+
+after_flap:
+    load32 ${STATE} r7
+    jmpiz ready_phys r7
+    set32 r8 1
+    sub r9 r7 r8
+    jmpiz play_phys r9
+    jmp frame_pace
+
+ready_phys:
+    jmp frame_pace
+
+; ---------------------------------------------------------------------------
+play_phys:
+    ; vel += gravity
+    load32 ${VEL} r0
+    set32 r1 ${GRAVITY}
+    add r0 r0 r1
+    store32 r0 ${VEL}
+    ; birdy += vel
+    load32 ${BIRDY} r2
+    add r2 r2 r0
+    ; clamp at ceiling
+    set32 r3 ${SIGN}
+    and r4 r2 r3
+    jmpiz no_topclamp r4
+    set32 r2 0
+    set32 r0 0
+    store32 r0 ${VEL}
+no_topclamp:
+    store32 r2 ${BIRDY}
+    set32 r5 4
+    shr r6 r2 r5
+    store32 r6 ${BPX}
+    ; ground: dead if (birdyPx + 5) >= 95
+    set32 r7 5
+    add r8 r6 r7
+    set32 r9 95
+    sub r10 r8 r9
+    set32 r11 ${SIGN}
+    and r12 r10 r11
+    jmpnz pipes_start r12
+    jmp set_dead
+
+pipes_start:
+    set32 r14 0
+    set32 r15 ${SIGN}
+pipe_loop:
+    set32 r0 12
+    mul r1 r14 r0
+    set32 r2 ${PIPEBASE}
+    add r3 r2 r1
+    load32p r3 r4
+    set32 r5 1
+    sub r4 r4 r5
+    and r6 r4 r15
+    jmpiz px_store r6
+    ; recycle pipe
+    set32 r4 100
+    load32 ${RNG} r7
+    set32 r8 45
+    div r9 r7 r8
+    mul r10 r9 r8
+    sub r11 r7 r10
+    set32 r12 10
+    add r11 r11 r12
+    set32 r0 4
+    add r1 r3 r0
+    store32p r11 r1
+    set32 r0 8
+    add r1 r3 r0
+    set32 r2 0
+    store32p r2 r1
+px_store:
+    store32p r4 r3
+    ; collision
+    set32 r0 4
+    add r1 r3 r0
+    load32p r1 r5
+    set32 r0 30
+    sub r6 r0 r4
+    and r7 r6 r15
+    jmpnz pipe_score r7
+    set32 r0 16
+    sub r6 r4 r0
+    and r7 r6 r15
+    jmpnz pipe_score r7
+    load32 ${BPX} r8
+    sub r6 r8 r5
+    and r7 r6 r15
+    jmpnz set_dead r7
+    set32 r0 5
+    add r9 r8 r0
+    set32 r0 ${GAPH}
+    add r10 r5 r0
+    sub r6 r10 r9
+    and r7 r6 r15
+    jmpnz set_dead r7
+pipe_score:
+    set32 r0 16
+    sub r6 r4 r0
+    and r7 r6 r15
+    jmpiz pipe_next r7
+    set32 r0 8
+    add r1 r3 r0
+    load32p r1 r9
+    jmpnz pipe_next r9
+    load32 ${SCORE} r10
+    set32 r11 1
+    add r10 r10 r11
+    store32 r10 ${SCORE}
+    store32p r11 r1
+pipe_next:
+    set32 r0 1
+    add r14 r14 r0
+    set32 r1 2
+    sub r2 r1 r14
+    jmpnz pipe_loop r2
+    jmp frame_pace
+
+set_dead:
+    set32 r0 2
+    store32 r0 ${STATE}
+    load32 ${SCORE} r1
+    load32 ${HISCORE} r2
+    set32 r3 ${SIGN}
+    sub r4 r2 r1
+    and r5 r4 r3
+    jmpiz sd_done r5
+    store32 r1 ${HISCORE}
+    set8 r6 1
+    store8 r6 ${SAVECTL}
+sd_done:
+    jmp frame_pace
+
+; ===========================================================================
+; PACING + RENDER  (draw happens last so the frame snapshot is a full image)
+; ===========================================================================
+frame_pace:
+    set32 r0 ${DELAY}
+    set32 r1 1
+pace_loop:
+    sub r0 r0 r1
+    jmpnz pace_loop r0
+
+draw_begin:
+    ; clear to sky
+    set32 r0 ${VRAM}
+    set32 r1 10000
+    set8 r2 0
+    set32 r3 1
+clear_loop:
+    store8p r2 r0
+    add r0 r0 r3
+    sub r1 r1 r3
+    jmpnz clear_loop r1
+    ; ground band
+    set32 r0 ${GROUND}
+    set32 r1 500
+    set8 r2 3
+ground_loop:
+    store8p r2 r0
+    add r0 r0 r3
+    sub r1 r1 r3
+    jmpnz ground_loop r1
+
+    ; --- pipes (2), full column scan for constant cost ---
+    set32 r13 0
+pd_pipe:
+    set32 r0 12
+    mul r1 r13 r0
+    set32 r2 ${PIPEBASE}
+    add r10 r2 r1
+    load32p r10 r11
+    set32 r0 4
+    add r1 r10 r0
+    load32p r1 r12
+    set32 r9 0
+pd_col:
+    add r8 r11 r9
+    set32 r0 100
+    sub r1 r0 r8
+    set32 r2 ${SIGN}
+    and r3 r1 r2
+    jmpnz pd_col_next r3
+    set32 r7 0
+pd_row:
+    set32 r2 ${SIGN}
+    sub r0 r7 r12
+    and r1 r0 r2
+    jmpnz pd_draw r1
+    set32 r0 ${GAPH}
+    add r3 r12 r0
+    sub r0 r7 r3
+    and r1 r0 r2
+    jmpnz pd_row_next r1
+pd_draw:
+    set32 r0 100
+    mul r1 r7 r0
+    add r1 r1 r8
+    set32 r2 ${VRAM}
+    add r1 r1 r2
+    set8 r0 1
+    store8p r0 r1
+pd_row_next:
+    set32 r0 1
+    add r7 r7 r0
+    set32 r1 95
+    sub r2 r1 r7
+    jmpnz pd_row r2
+pd_col_next:
+    set32 r0 1
+    add r9 r9 r0
+    set32 r1 10
+    sub r2 r1 r9
+    jmpnz pd_col r2
+    set32 r0 1
+    add r13 r13 r0
+    set32 r1 2
+    sub r2 r1 r13
+    jmpnz pd_pipe r2
+
+    ; --- bird (6x5 body) ---
+    load32 ${BPX} r12
+    set32 r11 ${BIRDX}
+    set32 r9 0
+bd_row:
+    set32 r10 0
+bd_col:
+    add r8 r11 r10
+    add r7 r12 r9
+    set32 r0 100
+    mul r1 r7 r0
+    add r1 r1 r8
+    set32 r2 ${VRAM}
+    add r1 r1 r2
+    set8 r0 2
+    store8p r0 r1
+    set32 r0 1
+    add r10 r10 r0
+    set32 r1 6
+    sub r2 r1 r10
+    jmpnz bd_col r2
+    set32 r0 1
+    add r9 r9 r0
+    set32 r1 5
+    sub r2 r1 r9
+    jmpnz bd_row r2
+    ; beak (red) at (BIRDX+6, BPX+2)
+    set32 r0 2
+    add r7 r12 r0
+    set32 r0 100
+    mul r1 r7 r0
+    set32 r2 31
+    add r1 r1 r2
+    set32 r2 ${VRAM}
+    add r1 r1 r2
+    set8 r0 5
+    store8p r0 r1
+
+    ; --- score digits ---
+    load32 ${SCORE} r0
+    set32 r1 100
+    div r2 r0 r1
+    store32 r2 ${DIGITS}
+    mul r3 r2 r1
+    sub r0 r0 r3
+    set32 r1 10
+    div r2 r0 r1
+    store32 r2 ${DIGIT1}
+    mul r3 r2 r1
+    sub r0 r0 r3
+    store32 r0 ${DIGIT2}
+    set32 r13 0
+sc_loop:
+    set32 r0 4
+    mul r1 r13 r0
+    set32 r2 ${DIGITS}
+    add r3 r2 r1
+    load32p r3 r12
+    set32 r0 5
+    mul r1 r12 r0
+    set32 r2 ${FONT}
+    add r11 r2 r1
+    set32 r0 4
+    mul r1 r13 r0
+    set32 r2 42
+    add r10 r2 r1
+    set32 r9 0
+sc_row:
+    add r0 r11 r9
+    load8p r0 r8
+    set32 r7 0
+sc_col:
+    set32 r0 2
+    sub r1 r0 r7
+    shr r2 r8 r1
+    set32 r3 1
+    and r4 r2 r3
+    jmpiz sc_col_next r4
+    add r5 r10 r7
+    set32 r0 2
+    add r6 r9 r0
+    set32 r0 100
+    mul r1 r6 r0
+    add r1 r1 r5
+    set32 r2 ${VRAM}
+    add r1 r1 r2
+    set8 r0 4
+    store8p r0 r1
+sc_col_next:
+    set32 r0 1
+    add r7 r7 r0
+    set32 r1 3
+    sub r2 r1 r7
+    jmpnz sc_col r2
+    set32 r0 1
+    add r9 r9 r0
+    set32 r1 5
+    sub r2 r1 r9
+    jmpnz sc_row r2
+    set32 r0 1
+    add r13 r13 r0
+    set32 r1 3
+    sub r2 r1 r13
+    jmpnz sc_loop r2
+
+    ; --- dead banner (red strip along the top) ---
+    load32 ${STATE} r0
+    set32 r1 2
+    sub r2 r0 r1
+    jmpnz skip_dead r2
+    set32 r0 ${VRAM}
+    set32 r1 300
+    set8 r2 5
+    set32 r3 1
+dead_loop:
+    store8p r2 r0
+    add r0 r0 r3
+    sub r1 r1 r3
+    jmpnz dead_loop r1
+skip_dead:
+    jmp frame_top
