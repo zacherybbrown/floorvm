@@ -1,0 +1,663 @@
+; ============================================================================
+; KIRBY - Star Catch  (FloorVM v2, 100x100, palette mode)
+; ----------------------------------------------------------------------------
+;   D-pad  -> move Kirby            A -> restart after a game over
+;   Catch the yellow stars for points. Avoid the roaming foe!
+;   High score is saved to SRAM. Frames are double-buffered via PRESENT.
+; ============================================================================
+
+; ---- Memory-mapped hardware ----
+#define VRAM 8192
+#define VMODE 18960
+#define INPUT 18961
+#define SAVECTL 18962
+#define HISCORE 18963      ; SRAM base
+#define PRESENT 27155
+
+; ---- Game variables (user RAM) ----
+#define KX 23059           ; Kirby top-left X
+#define KY 23063
+#define SX 23067           ; star X
+#define SY 23071
+#define EX 23075           ; enemy X
+#define EY 23079
+#define EVX 23083          ; enemy X velocity (two's complement +1/-1)
+#define EVY 23087
+#define SCORE 23091
+#define STATE 23095        ; 0 = play, 1 = dead
+#define RNG 23099
+#define PREVA 23103        ; previous A bits (restart edge)
+#define DIGITS 23107
+#define DIGIT1 23111
+#define DIGIT2 23115
+
+; ---- Constants ----
+#define FONT 5             ; digit font, fixed ROM offset 5
+#define KFEAT 55           ; Kirby feature table, fixed ROM offset 55
+#define KFEATN 11          ; number of feature pixels
+#define SIGN 0x80000000
+#define SPEED 2
+#define KMAX 89            ; 100 - 11 (kirby size)
+#define SMAX 93            ; 100 - 7  (star size)
+#define EMAX 91            ; 100 - 9  (enemy size)
+
+; ---------------------------------------------------------------------------
+; Fixed-offset data: a 5-byte JMP, then the digit font (offset 5) and the
+; Kirby feature table (offset 55), so both can be addressed by immediate.
+; ---------------------------------------------------------------------------
+    jmp init_all
+
+digitfont:
+    .BYTE 7 5 5 5 7    ; 0
+    .BYTE 2 6 2 2 7    ; 1
+    .BYTE 6 1 2 4 7    ; 2
+    .BYTE 7 1 3 1 7    ; 3
+    .BYTE 5 5 7 1 1    ; 4
+    .BYTE 7 4 7 1 7    ; 5
+    .BYTE 3 4 7 5 7    ; 6
+    .BYTE 7 1 2 2 2    ; 7
+    .BYTE 7 5 7 5 7    ; 8
+    .BYTE 7 5 7 1 6    ; 9
+
+kfeat:                 ; (dx, dy, colorIndex) relative to Kirby's top-left
+    .BYTE 3 4 3        ; left eye  (black)
+    .BYTE 7 4 3        ; right eye (black)
+    .BYTE 3 3 4        ; left eye shine  (white)
+    .BYTE 7 3 4        ; right eye shine (white)
+    .BYTE 1 6 2        ; left cheek  (red)
+    .BYTE 9 6 2        ; right cheek (red)
+    .BYTE 5 7 2        ; mouth (red)
+    .BYTE 2 10 2       ; foot
+    .BYTE 3 10 2       ; foot
+    .BYTE 7 10 2       ; foot
+    .BYTE 8 10 2       ; foot
+
+; ===========================================================================
+; One-time setup
+; ===========================================================================
+init_all:
+    ; palette 0: night bg (25,25,60)
+    set8 r0 25
+    store8 r0 18192
+    set8 r0 25
+    store8 r0 18193
+    set8 r0 60
+    store8 r0 18194
+    ; 1: kirby pink (250,150,190)
+    set8 r0 250
+    store8 r0 18195
+    set8 r0 150
+    store8 r0 18196
+    set8 r0 190
+    store8 r0 18197
+    ; 2: red accent (225,70,110)
+    set8 r0 225
+    store8 r0 18198
+    set8 r0 70
+    store8 r0 18199
+    set8 r0 110
+    store8 r0 18200
+    ; 3: black (20,20,35)
+    set8 r0 20
+    store8 r0 18201
+    set8 r0 20
+    store8 r0 18202
+    set8 r0 35
+    store8 r0 18203
+    ; 4: white
+    set8 r0 255
+    store8 r0 18204
+    set8 r0 255
+    store8 r0 18205
+    set8 r0 255
+    store8 r0 18206
+    ; 5: star yellow (255,225,60)
+    set8 r0 255
+    store8 r0 18207
+    set8 r0 225
+    store8 r0 18208
+    set8 r0 60
+    store8 r0 18209
+    ; 6: enemy (230,100,50)
+    set8 r0 230
+    store8 r0 18210
+    set8 r0 100
+    store8 r0 18211
+    set8 r0 50
+    store8 r0 18212
+
+    set8 r0 1
+    store8 r0 ${VMODE}
+    set32 r0 2463534242
+    store32 r0 ${RNG}
+
+init_game:
+    set32 r0 45
+    store32 r0 ${KX}
+    set32 r0 45
+    store32 r0 ${KY}
+    set32 r0 20
+    store32 r0 ${SX}
+    set32 r0 20
+    store32 r0 ${SY}
+    set32 r0 80
+    store32 r0 ${EX}
+    set32 r0 10
+    store32 r0 ${EY}
+    set32 r0 1
+    store32 r0 ${EVX}
+    set32 r0 1
+    store32 r0 ${EVY}
+    set32 r0 0
+    store32 r0 ${SCORE}
+    set32 r0 0
+    store32 r0 ${STATE}
+    set32 r0 0
+    store32 r0 ${PREVA}
+    jmp frame_top
+
+; ===========================================================================
+; MAIN LOOP
+; ===========================================================================
+frame_top:
+    ; advance rng (xorshift32)
+    load32 ${RNG} r0
+    set32 r2 13
+    shl r1 r0 r2
+    xor r0 r0 r1
+    set32 r2 17
+    shr r1 r0 r2
+    xor r0 r0 r1
+    set32 r2 5
+    shl r1 r0 r2
+    xor r0 r0 r1
+    store32 r0 ${RNG}
+
+    load32 ${STATE} r0
+    jmpnz dead_branch r0
+
+; ---- movement ----
+    load8 ${INPUT} r1
+    ; UP
+    set8 r2 1
+    and r3 r1 r2
+    jmpiz mv_down r3
+    load32 ${KY} r4
+    set32 r5 ${SPEED}
+    sub r4 r4 r5
+    set32 r6 ${SIGN}
+    and r7 r4 r6
+    jmpiz ky_up_ok r7
+    set32 r4 0
+ky_up_ok:
+    store32 r4 ${KY}
+mv_down:
+    set8 r2 2
+    and r3 r1 r2
+    jmpiz mv_left r3
+    load32 ${KY} r4
+    set32 r5 ${SPEED}
+    add r4 r4 r5
+    set32 r6 ${KMAX}
+    set32 r8 ${SIGN}
+    sub r7 r6 r4
+    and r9 r7 r8
+    jmpiz ky_dn_ok r9
+    set32 r4 ${KMAX}
+ky_dn_ok:
+    store32 r4 ${KY}
+mv_left:
+    set8 r2 4
+    and r3 r1 r2
+    jmpiz mv_right r3
+    load32 ${KX} r4
+    set32 r5 ${SPEED}
+    sub r4 r4 r5
+    set32 r6 ${SIGN}
+    and r7 r4 r6
+    jmpiz kx_lf_ok r7
+    set32 r4 0
+kx_lf_ok:
+    store32 r4 ${KX}
+mv_right:
+    set8 r2 8
+    and r3 r1 r2
+    jmpiz enemy_move r3
+    load32 ${KX} r4
+    set32 r5 ${SPEED}
+    add r4 r4 r5
+    set32 r6 ${KMAX}
+    set32 r8 ${SIGN}
+    sub r7 r6 r4
+    and r9 r7 r8
+    jmpiz kx_rt_ok r9
+    set32 r4 ${KMAX}
+kx_rt_ok:
+    store32 r4 ${KX}
+
+; ---- enemy movement + wall bounce ----
+enemy_move:
+    load32 ${EX} r0
+    load32 ${EVX} r1
+    add r0 r0 r1
+    set32 r2 ${SIGN}
+    set32 r3 1
+    sub r4 r0 r3
+    and r5 r4 r2
+    jmpiz ex_hi r5
+    set32 r0 0
+    set32 r6 1
+    store32 r6 ${EVX}
+    jmp ex_store
+ex_hi:
+    set32 r3 ${EMAX}
+    sub r4 r0 r3
+    and r5 r4 r2
+    jmpnz ex_store r5
+    set32 r0 ${EMAX}
+    set32 r6 0
+    set32 r7 1
+    sub r6 r6 r7
+    store32 r6 ${EVX}
+ex_store:
+    store32 r0 ${EX}
+
+    load32 ${EY} r0
+    load32 ${EVY} r1
+    add r0 r0 r1
+    set32 r2 ${SIGN}
+    set32 r3 1
+    sub r4 r0 r3
+    and r5 r4 r2
+    jmpiz ey_hi r5
+    set32 r0 0
+    set32 r6 1
+    store32 r6 ${EVY}
+    jmp ey_store
+ey_hi:
+    set32 r3 ${EMAX}
+    sub r4 r0 r3
+    and r5 r4 r2
+    jmpnz ey_store r5
+    set32 r0 ${EMAX}
+    set32 r6 0
+    set32 r7 1
+    sub r6 r6 r7
+    store32 r6 ${EVY}
+ey_store:
+    store32 r0 ${EY}
+
+; ---- star pickup (kirby 11x11 vs star 7x7) ----
+    load32 ${KX} r0
+    load32 ${KY} r1
+    load32 ${SX} r2
+    load32 ${SY} r3
+    set32 r14 ${SIGN}
+    set32 r4 7
+    add r5 r2 r4
+    sub r6 r0 r5
+    and r7 r6 r14
+    jmpiz no_star r7
+    set32 r4 11
+    add r5 r0 r4
+    sub r6 r2 r5
+    and r7 r6 r14
+    jmpiz no_star r7
+    set32 r4 7
+    add r5 r3 r4
+    sub r6 r1 r5
+    and r7 r6 r14
+    jmpiz no_star r7
+    set32 r4 11
+    add r5 r1 r4
+    sub r6 r3 r5
+    and r7 r6 r14
+    jmpiz no_star r7
+    ; caught it
+    load32 ${SCORE} r0
+    set32 r1 1
+    add r0 r0 r1
+    store32 r0 ${SCORE}
+    load32 ${RNG} r2
+    set32 r3 ${SMAX}
+    div r4 r2 r3
+    mul r5 r4 r3
+    sub r6 r2 r5
+    store32 r6 ${SX}
+    set32 r7 9
+    shr r8 r2 r7
+    div r4 r8 r3
+    mul r5 r4 r3
+    sub r6 r8 r5
+    store32 r6 ${SY}
+no_star:
+
+; ---- enemy hit (kirby 11x11 vs enemy 9x9) -> dead ----
+    load32 ${KX} r0
+    load32 ${KY} r1
+    load32 ${EX} r2
+    load32 ${EY} r3
+    set32 r14 ${SIGN}
+    set32 r4 9
+    add r5 r2 r4
+    sub r6 r0 r5
+    and r7 r6 r14
+    jmpiz no_hit r7
+    set32 r4 11
+    add r5 r0 r4
+    sub r6 r2 r5
+    and r7 r6 r14
+    jmpiz no_hit r7
+    set32 r4 9
+    add r5 r3 r4
+    sub r6 r1 r5
+    and r7 r6 r14
+    jmpiz no_hit r7
+    set32 r4 11
+    add r5 r1 r4
+    sub r6 r3 r5
+    and r7 r6 r14
+    jmpiz no_hit r7
+    ; hit -> game over
+    set32 r0 1
+    store32 r0 ${STATE}
+    load32 ${SCORE} r1
+    load32 ${HISCORE} r2
+    set32 r3 ${SIGN}
+    sub r4 r2 r1
+    and r5 r4 r3
+    jmpiz no_hit r5
+    store32 r1 ${HISCORE}
+    set8 r6 1
+    store8 r6 ${SAVECTL}
+no_hit:
+    jmp draw
+
+; ---- dead: wait for A to restart ----
+dead_branch:
+    load8 ${INPUT} r0
+    set8 r1 16
+    and r2 r0 r1
+    load32 ${PREVA} r3
+    store32 r2 ${PREVA}
+    jmpiz draw r2
+    jmpnz draw r3
+    jmp init_game
+
+; ===========================================================================
+; RENDER
+; ===========================================================================
+draw:
+    set32 r0 76100        ; frame pacing (calibrated ~60 iterations/second)
+    set32 r1 1
+pace:
+    sub r0 r0 r1
+    jmpnz pace r0
+
+    ; background
+    set32 r0 ${VRAM}
+    set32 r1 10000
+    set8 r2 0
+    set32 r3 1
+bg_loop:
+    store8p r2 r0
+    add r0 r0 r3
+    sub r1 r1 r3
+    jmpnz bg_loop r1
+
+    ; --- star (7x7 diamond) ---
+    load32 ${SX} r10
+    load32 ${SY} r11
+    set32 r13 0
+star_row:
+    set32 r12 0
+star_col:
+    set32 r2 ${SIGN}
+    set32 r0 3
+    sub r1 r12 r0
+    and r3 r1 r2
+    jmpiz s_adx r3
+    sub r1 r0 r12
+s_adx:
+    set32 r4 3
+    sub r5 r13 r4
+    and r6 r5 r2
+    jmpiz s_ady r6
+    sub r5 r4 r13
+s_ady:
+    add r6 r1 r5
+    set32 r7 3
+    sub r8 r7 r6
+    and r9 r8 r2
+    jmpnz star_next r9
+    add r6 r10 r12
+    add r7 r11 r13
+    set32 r0 100
+    mul r1 r7 r0
+    add r1 r1 r6
+    set32 r2 ${VRAM}
+    add r1 r1 r2
+    set8 r0 5
+    store8p r0 r1
+star_next:
+    set32 r0 1
+    add r12 r12 r0
+    set32 r1 7
+    sub r2 r1 r12
+    jmpnz star_col r2
+    set32 r0 1
+    add r13 r13 r0
+    set32 r1 7
+    sub r2 r1 r13
+    jmpnz star_row r2
+
+    ; --- enemy (9x9 block + eyes) ---
+    load32 ${EX} r10
+    load32 ${EY} r11
+    set32 r13 0
+en_row:
+    set32 r12 0
+en_col:
+    add r6 r10 r12
+    add r7 r11 r13
+    set32 r0 100
+    mul r1 r7 r0
+    add r1 r1 r6
+    set32 r2 ${VRAM}
+    add r1 r1 r2
+    set8 r0 6
+    store8p r0 r1
+    set32 r0 1
+    add r12 r12 r0
+    set32 r1 9
+    sub r2 r1 r12
+    jmpnz en_col r2
+    set32 r0 1
+    add r13 r13 r0
+    set32 r1 9
+    sub r2 r1 r13
+    jmpnz en_row r2
+    ; enemy eyes (black) at (EX+2,EY+3) and (EX+6,EY+3)
+    set32 r0 100
+    set32 r1 3
+    add r2 r11 r1
+    mul r3 r2 r0
+    set32 r4 2
+    add r5 r10 r4
+    add r3 r3 r5
+    set32 r6 ${VRAM}
+    add r3 r3 r6
+    set8 r7 3
+    store8p r7 r3
+    set32 r0 100
+    set32 r1 3
+    add r2 r11 r1
+    mul r3 r2 r0
+    set32 r4 6
+    add r5 r10 r4
+    add r3 r3 r5
+    set32 r6 ${VRAM}
+    add r3 r3 r6
+    set8 r7 3
+    store8p r7 r3
+
+    ; --- kirby (11x11 chamfered body) ---
+    load32 ${KX} r10
+    load32 ${KY} r11
+    set32 r13 0
+k_row:
+    set32 r12 0
+k_col:
+    set32 r8 ${SIGN}
+    add r3 r12 r13
+    set32 r4 2
+    sub r5 r3 r4
+    and r6 r5 r8
+    jmpnz k_inc r6            ; dx+dy < 2 -> corner
+    set32 r4 18
+    sub r5 r4 r3
+    and r6 r5 r8
+    jmpnz k_inc r6            ; dx+dy > 18 -> corner
+    sub r5 r12 r13
+    set32 r4 9
+    sub r7 r5 r4
+    and r6 r7 r8
+    jmpiz k_inc r6           ; dx-dy >= 9 -> corner
+    sub r5 r13 r12
+    sub r7 r5 r4
+    and r6 r7 r8
+    jmpiz k_inc r6           ; dy-dx >= 9 -> corner
+    add r6 r10 r12
+    add r7 r11 r13
+    set32 r0 100
+    mul r1 r7 r0
+    add r1 r1 r6
+    set32 r2 ${VRAM}
+    add r1 r1 r2
+    set8 r0 1
+    store8p r0 r1
+k_inc:
+    set32 r0 1
+    add r12 r12 r0
+    set32 r1 11
+    sub r2 r1 r12
+    jmpnz k_col r2
+    set32 r0 1
+    add r13 r13 r0
+    set32 r1 11
+    sub r2 r1 r13
+    jmpnz k_row r2
+
+    ; kirby features from table
+    set32 r13 0
+kf_loop:
+    set32 r0 3
+    mul r1 r13 r0
+    set32 r2 ${KFEAT}
+    add r3 r2 r1
+    load8p r3 r4             ; dx
+    set32 r0 1
+    add r5 r3 r0
+    load8p r5 r6             ; dy
+    set32 r0 2
+    add r5 r3 r0
+    load8p r5 r7             ; color
+    load32 ${KX} r0
+    add r8 r0 r4
+    load32 ${KY} r0
+    add r9 r0 r6
+    set32 r0 100
+    mul r1 r9 r0
+    add r1 r1 r8
+    set32 r2 ${VRAM}
+    add r1 r1 r2
+    store8p r7 r1
+    set32 r0 1
+    add r13 r13 r0
+    set32 r1 ${KFEATN}
+    sub r2 r1 r13
+    jmpnz kf_loop r2
+
+    ; --- score (3 digits, top-left) ---
+    load32 ${SCORE} r0
+    set32 r1 100
+    div r2 r0 r1
+    store32 r2 ${DIGITS}
+    mul r3 r2 r1
+    sub r0 r0 r3
+    set32 r1 10
+    div r2 r0 r1
+    store32 r2 ${DIGIT1}
+    mul r3 r2 r1
+    sub r0 r0 r3
+    store32 r0 ${DIGIT2}
+    set32 r13 0
+sc_loop:
+    set32 r0 4
+    mul r1 r13 r0
+    set32 r2 ${DIGITS}
+    add r3 r2 r1
+    load32p r3 r12
+    set32 r0 5
+    mul r1 r12 r0
+    set32 r2 ${FONT}
+    add r11 r2 r1
+    set32 r0 4
+    mul r1 r13 r0
+    set32 r2 2
+    add r10 r2 r1
+    set32 r9 0
+sc_row:
+    add r0 r11 r9
+    load8p r0 r8
+    set32 r7 0
+sc_col:
+    set32 r0 2
+    sub r1 r0 r7
+    shr r2 r8 r1
+    set32 r3 1
+    and r4 r2 r3
+    jmpiz sc_col_next r4
+    add r5 r10 r7
+    set32 r0 2
+    add r6 r9 r0
+    set32 r0 100
+    mul r1 r6 r0
+    add r1 r1 r5
+    set32 r2 ${VRAM}
+    add r1 r1 r2
+    set8 r0 4
+    store8p r0 r1
+sc_col_next:
+    set32 r0 1
+    add r7 r7 r0
+    set32 r1 3
+    sub r2 r1 r7
+    jmpnz sc_col r2
+    set32 r0 1
+    add r9 r9 r0
+    set32 r1 5
+    sub r2 r1 r9
+    jmpnz sc_row r2
+    set32 r0 1
+    add r13 r13 r0
+    set32 r1 3
+    sub r2 r1 r13
+    jmpnz sc_loop r2
+
+    ; --- game-over banner (red strip) ---
+    load32 ${STATE} r0
+    jmpiz skip_dead r0
+    set32 r0 ${VRAM}
+    set32 r1 300
+    set8 r2 2
+    set32 r3 1
+dead_loop:
+    store8p r2 r0
+    add r0 r0 r3
+    sub r1 r1 r3
+    jmpnz dead_loop r1
+skip_dead:
+    set8 r0 1
+    store8 r0 ${PRESENT}
+    jmp frame_top

@@ -1,0 +1,331 @@
+; ============================================================================
+; PAINT 2.0  (FloorVM v2, 100x100, palette color)
+; ----------------------------------------------------------------------------
+;   Arrow keys -> move the brush        [A] -> paint (brush down)
+;   [D]        -> erase                 Enter -> switch color
+;
+; The canvas lives in VRAM and persists. The brush cursor is a 3x3 ring drawn
+; in the current color; the pixels underneath are saved and restored each frame
+; so moving the cursor never smears the canvas. Frames are presented (tear-free).
+; ============================================================================
+
+; ---- Memory-mapped hardware ----
+#define VRAM 8192
+#define VMODE 18960
+#define INPUT 18961
+#define PRESENT 27155
+
+; ---- State (user RAM) ----
+#define CX 23059
+#define CY 23063
+#define COLOR 23067        ; current brush color index (1..8)
+#define PREVSEL 23071      ; previous Enter/Select bits (edge detect)
+#define OCX 23075          ; cursor position the ring was last drawn at
+#define OCY 23079
+#define FIRST 23083        ; 1 until the first frame's ring exists
+#define SAVED 23087        ; 8 bytes: canvas colors under the ring
+
+; ---- Constants ----
+#define RING 5             ; ring-offset table, fixed ROM offset 5
+#define SIGN 0x80000000
+#define NCOLORS 8
+#define CMIN 1             ; cursor clamp so the 3x3 ring stays on-screen
+#define CMAX 98
+
+; ---------------------------------------------------------------------------
+; 5-byte JMP keeps the ring-offset table at a known offset (5). Each entry is
+; (dx+1, dy+1) in {0,1,2}; the 8 neighbours of the center (center excluded).
+; ---------------------------------------------------------------------------
+    jmp init_all
+
+ring:
+    .BYTE 0 0
+    .BYTE 1 0
+    .BYTE 2 0
+    .BYTE 0 1
+    .BYTE 2 1
+    .BYTE 0 2
+    .BYTE 1 2
+    .BYTE 2 2
+
+; ===========================================================================
+; Setup
+; ===========================================================================
+init_all:
+    ; palette 0 = background (30,30,40)
+    set8 r0 30
+    store8 r0 18192
+    set8 r0 30
+    store8 r0 18193
+    set8 r0 40
+    store8 r0 18194
+    ; 1 white
+    set8 r0 240
+    store8 r0 18195
+    set8 r0 240
+    store8 r0 18196
+    set8 r0 240
+    store8 r0 18197
+    ; 2 red
+    set8 r0 230
+    store8 r0 18198
+    set8 r0 60
+    store8 r0 18199
+    set8 r0 60
+    store8 r0 18200
+    ; 3 orange
+    set8 r0 240
+    store8 r0 18201
+    set8 r0 150
+    store8 r0 18202
+    set8 r0 40
+    store8 r0 18203
+    ; 4 yellow
+    set8 r0 240
+    store8 r0 18204
+    set8 r0 230
+    store8 r0 18205
+    set8 r0 60
+    store8 r0 18206
+    ; 5 green
+    set8 r0 70
+    store8 r0 18207
+    set8 r0 200
+    store8 r0 18208
+    set8 r0 90
+    store8 r0 18209
+    ; 6 cyan
+    set8 r0 60
+    store8 r0 18210
+    set8 r0 190
+    store8 r0 18211
+    set8 r0 210
+    store8 r0 18212
+    ; 7 blue
+    set8 r0 70
+    store8 r0 18213
+    set8 r0 110
+    store8 r0 18214
+    set8 r0 230
+    store8 r0 18215
+    ; 8 purple
+    set8 r0 175
+    store8 r0 18216
+    set8 r0 80
+    store8 r0 18217
+    set8 r0 220
+    store8 r0 18218
+
+    set8 r0 1
+    store8 r0 ${VMODE}
+
+    ; clear canvas to background
+    set32 r0 ${VRAM}
+    set32 r1 10000
+    set8 r2 0
+    set32 r3 1
+clr_loop:
+    store8p r2 r0
+    add r0 r0 r3
+    sub r1 r1 r3
+    jmpnz clr_loop r1
+
+init_game:
+    set32 r0 50
+    store32 r0 ${CX}
+    set32 r0 50
+    store32 r0 ${CY}
+    set32 r0 2
+    store32 r0 ${COLOR}
+    set32 r0 0
+    store32 r0 ${PREVSEL}
+    set32 r0 1
+    store32 r0 ${FIRST}
+
+; ===========================================================================
+; MAIN LOOP
+; ===========================================================================
+frame_top:
+    ; --- restore canvas under the previous ring ---
+    load32 ${FIRST} r0
+    jmpnz after_restore r0
+    load32 ${OCX} r10
+    load32 ${OCY} r11
+    set32 r13 0
+rr_loop:
+    set32 r0 2
+    mul r1 r13 r0
+    set32 r2 ${RING}
+    add r3 r2 r1
+    load8p r3 r4
+    set32 r0 1
+    add r5 r3 r0
+    load8p r5 r6
+    add r7 r10 r4
+    set32 r0 1
+    sub r7 r7 r0
+    add r8 r11 r6
+    sub r8 r8 r0
+    set32 r0 100
+    mul r1 r8 r0
+    add r1 r1 r7
+    set32 r2 ${VRAM}
+    add r1 r1 r2
+    set32 r2 ${SAVED}
+    add r3 r2 r13
+    load8p r3 r5
+    store8p r5 r1
+    set32 r0 1
+    add r13 r13 r0
+    set32 r1 8
+    sub r2 r1 r13
+    jmpnz rr_loop r2
+after_restore:
+    set32 r0 0
+    store32 r0 ${FIRST}
+
+    ; --- switch color on Enter (Select) rising edge ---
+    load8 ${INPUT} r0
+    set8 r1 64
+    and r2 r0 r1
+    load32 ${PREVSEL} r3
+    store32 r2 ${PREVSEL}
+    jmpiz no_switch r2
+    jmpnz no_switch r3
+    load32 ${COLOR} r4
+    set32 r5 1
+    add r4 r4 r5
+    set32 r6 ${NCOLORS}
+    sub r7 r6 r4
+    set32 r8 ${SIGN}
+    and r9 r7 r8
+    jmpiz col_ok r9
+    set32 r4 1
+col_ok:
+    store32 r4 ${COLOR}
+no_switch:
+
+    ; --- movement (clamped to CMIN..CMAX) ---
+    load8 ${INPUT} r0
+    set8 r1 1
+    and r2 r0 r1
+    jmpiz mv_dn r2
+    load32 ${CY} r3
+    set32 r4 1
+    sub r3 r3 r4
+    jmpnz cy_up_st r3
+    set32 r3 ${CMIN}
+cy_up_st:
+    store32 r3 ${CY}
+mv_dn:
+    set8 r1 2
+    and r2 r0 r1
+    jmpiz mv_lf r2
+    load32 ${CY} r3
+    set32 r4 1
+    add r3 r3 r4
+    set32 r5 ${CMAX}
+    sub r6 r5 r3
+    set32 r7 ${SIGN}
+    and r8 r6 r7
+    jmpiz cy_dn_st r8
+    set32 r3 ${CMAX}
+cy_dn_st:
+    store32 r3 ${CY}
+mv_lf:
+    set8 r1 4
+    and r2 r0 r1
+    jmpiz mv_rt r2
+    load32 ${CX} r3
+    set32 r4 1
+    sub r3 r3 r4
+    jmpnz cx_lf_st r3
+    set32 r3 ${CMIN}
+cx_lf_st:
+    store32 r3 ${CX}
+mv_rt:
+    set8 r1 8
+    and r2 r0 r1
+    jmpiz mv_done r2
+    load32 ${CX} r3
+    set32 r4 1
+    add r3 r3 r4
+    set32 r5 ${CMAX}
+    sub r6 r5 r3
+    set32 r7 ${SIGN}
+    and r8 r6 r7
+    jmpiz cx_rt_st r8
+    set32 r3 ${CMAX}
+cx_rt_st:
+    store32 r3 ${CX}
+mv_done:
+
+    ; --- paint (A) / erase (D) at the brush center ---
+    load8 ${INPUT} r0
+    load32 ${CX} r1
+    load32 ${CY} r2
+    set32 r3 100
+    mul r4 r2 r3
+    add r4 r4 r1
+    set32 r5 ${VRAM}
+    add r4 r4 r5
+    set8 r6 16
+    and r7 r0 r6
+    jmpiz p_erase r7
+    load32 ${COLOR} r8
+    store8p r8 r4
+    jmp p_done
+p_erase:
+    set8 r6 32
+    and r7 r0 r6
+    jmpiz p_done r7
+    set8 r8 0
+    store8p r8 r4
+p_done:
+
+    ; --- save canvas under the new ring, then draw the ring ---
+    load32 ${CX} r10
+    load32 ${CY} r11
+    store32 r10 ${OCX}
+    store32 r11 ${OCY}
+    load32 ${COLOR} r12
+    set32 r13 0
+sd_loop:
+    set32 r0 2
+    mul r1 r13 r0
+    set32 r2 ${RING}
+    add r3 r2 r1
+    load8p r3 r4
+    set32 r0 1
+    add r5 r3 r0
+    load8p r5 r6
+    add r7 r10 r4
+    set32 r0 1
+    sub r7 r7 r0
+    add r8 r11 r6
+    sub r8 r8 r0
+    set32 r0 100
+    mul r1 r8 r0
+    add r1 r1 r7
+    set32 r2 ${VRAM}
+    add r1 r1 r2
+    load8p r1 r5
+    set32 r2 ${SAVED}
+    add r3 r2 r13
+    store8p r5 r3
+    store8p r12 r1
+    set32 r0 1
+    add r13 r13 r0
+    set32 r1 8
+    sub r2 r1 r13
+    jmpnz sd_loop r2
+
+    ; --- pace + present ---
+    set32 r0 99900        ; frame pacing (~60 iterations/second)
+    set32 r1 1
+pace:
+    sub r0 r0 r1
+    jmpnz pace r0
+    set8 r0 1
+    store8 r0 ${PRESENT}
+    jmp frame_top

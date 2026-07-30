@@ -27,7 +27,8 @@
 #define SAVECTL_SIZE 1
 #define SRAM_SIZE 4096
 #define USER_SIZE 4096
-#define RAM_SIZE (PROGRAM_SIZE + VRAM_SIZE + PALETTE_SIZE + VMODE_SIZE + INPUT_SIZE + SAVECTL_SIZE + SRAM_SIZE + USER_SIZE)
+#define PRESENT_SIZE 1
+#define RAM_SIZE (PROGRAM_SIZE + VRAM_SIZE + PALETTE_SIZE + VMODE_SIZE + INPUT_SIZE + SAVECTL_SIZE + SRAM_SIZE + USER_SIZE + PRESENT_SIZE)
 
 #define PROGRAM_START 0
 #define VRAM_START PROGRAM_SIZE
@@ -37,6 +38,10 @@
 #define SAVECTL_START (INPUT_START + INPUT_SIZE)
 #define SRAM_START (SAVECTL_START + SAVECTL_SIZE)
 #define USER_START (SRAM_START + SRAM_SIZE)
+// Present/vsync register: a program writes non-zero here after drawing a
+// complete frame; the emulator latches VRAM to the display then clears it.
+// Programs that never write it fall back to showing live VRAM every frame.
+#define PRESENT_START (USER_START + USER_SIZE)
 
 // Button Bitmasks (0=released,1=pressed)
 #define BTN_UP (1 << 0)     // 0x01 (Bit 0)

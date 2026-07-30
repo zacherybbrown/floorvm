@@ -1,11 +1,18 @@
 #include "renderer.h"
 #include <SDL3/SDL.h>
+#include <string.h>
 
 static SDL_Window *window = NULL;
 static SDL_Renderer *sdl_renderer = NULL;
 static SDL_Texture *texture = NULL;
 
 static int scale = 1;
+
+// Display double-buffer. A program presents complete frames into this buffer;
+// until it does, `has_presented` stays false and we mirror live VRAM instead
+// (keeps simple, non-presenting programs working exactly as before).
+static byte display[SCREEN_WIDTH * SCREEN_HEIGHT];
+static bool has_presented = false;
 
 // Expands a 3-bit channel (0-7) to 8 bits by bit-replication.
 static inline byte expand3(byte v3)
@@ -44,14 +51,29 @@ byte renderer_init(int gui_scale)
     return MS_OK;
 }
 
+void renderer_present(const Machine *machine)
+{
+    memcpy(display, &machine->ram[VRAM_START], SCREEN_WIDTH * SCREEN_HEIGHT);
+    has_presented = true;
+}
+
+void renderer_reset_present(void)
+{
+    has_presented = false;
+}
+
 void renderer_frame(const Machine *machine)
 {
     static uint32_t pixels[SCREEN_WIDTH * SCREEN_HEIGHT];
     byte mode = machine->ram[VMODE_START];
 
+    // Non-presenting programs just show whatever is in VRAM right now.
+    if (!has_presented)
+        memcpy(display, &machine->ram[VRAM_START], SCREEN_WIDTH * SCREEN_HEIGHT);
+
     for (int i = 0; i < SCREEN_WIDTH * SCREEN_HEIGHT; i++)
     {
-        byte value = machine->ram[VRAM_START + i];
+        byte value = display[i];
         byte r, g, b;
 
         if (mode == VMODE_PALETTE)

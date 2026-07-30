@@ -16,6 +16,7 @@
 #define INPUT 18961
 #define SAVECTL 18962
 #define HISCORE 18963     ; SRAM base
+#define PRESENT 27155     ; write non-zero when a full frame is drawn
 
 ; ---- Game variables (user RAM) ----
 #define BIRDY 23059       ; bird Y in 1/16-pixel fixed point
@@ -542,4 +543,7 @@ dead_loop:
     sub r1 r1 r3
     jmpnz dead_loop r1
 skip_dead:
+    ; frame complete -> present it (double-buffered, tear-free)
+    set8 r0 1
+    store8 r0 ${PRESENT}
     jmp frame_top

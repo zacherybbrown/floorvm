@@ -19,7 +19,8 @@ A lightweight, high-efficiency virtual machine with a variable-length byte-strea
 | **Program counter**    | Unsigned 16-bit integer (pc)                         |
 | **Endianness**         | Big-endian                                           |
 | **Persistent save**    | 4 KB SRAM (battery-backed, per program)              |
-| **Total memory**       | 27,155 bytes (≈26.5 KiB)                             |
+| **Frame output**       | Double-buffered via a PRESENT register (tear-free)   |
+| **Total memory**       | 27,156 bytes (≈26.5 KiB)                             |
 
 ---
 
@@ -37,6 +38,7 @@ Memory is mapped into linear segments across a continuous byte array:
 | **Save control**   | 18962       | `0x4A12`    | 1 byte  | Write non-zero to flush SRAM to persistent storage     |
 | **SRAM (save)**    | 18963       | `0x4A13`    | 4 KiB   | Persistent per-program save data                       |
 | **User work RAM**  | 23059       | `0x5A13`    | 4 KiB   | General-purpose user-controlled free RAM               |
+| **Present**        | 27155       | `0x6A13`    | 1 byte  | Write non-zero to display the finished frame (vsync)   |
 
 ---
 
@@ -61,6 +63,22 @@ store8 r0 18197     ; palette[1].B
 set8 r0 1
 store8 r0 8192      ; VRAM pixel 0 -> palette index 1 (red)
 ```
+
+---
+
+## Frame presentation (double buffering)
+
+The emulator continuously displays VRAM, so a program that clears and redraws every frame can be caught mid-draw, causing tearing/flicker. To draw cleanly, a program renders a full frame and then writes a non-zero byte to the **PRESENT register** (address 27155). The emulator latches that completed frame into its display buffer and shows only latched frames — never a half-drawn one.
+
+A typical game loop ends each iteration with:
+
+```assembly
+set8 r0 1
+store8 r0 27155     ; present the finished frame
+jmp frame_top
+```
+
+Programs that never write PRESENT (e.g. static demos) simply show live VRAM, exactly as before.
 
 ---
 
@@ -195,6 +213,8 @@ The Python assembler compiles `.asm`/`.txt` text files into ROMs padded to exact
 ## Example programs
 
 * [`programs/flappy.txt`](programs/flappy.txt) — a full **Flappy Bird** in palette mode: gravity, scrolling pipes with pseudo-random gaps, scoring, and a high score saved to SRAM.
+* [`programs/kirby.txt`](programs/kirby.txt) — **Kirby Star Catch**: move Kirby with the D-pad to grab stars while dodging a roaming foe; high score saved to SRAM.
+* [`programs/paint2.txt`](programs/paint2.txt) — **Paint 2.0**: a color drawing tool. Arrow keys move the brush, **A** paints, **D** erases, **Enter** cycles color.
 * [`programs/colorbars.txt`](programs/colorbars.txt) — a palette rainbow demo.
 
 ---

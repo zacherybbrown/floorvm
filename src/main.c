@@ -35,6 +35,14 @@ static int run_program(Machine *machine)
             machine_step(machine);
             if (machine->status != MS_OK)
                 break;
+
+            // Latch a completed frame the instant the program presents it, so
+            // the display never shows a half-drawn framebuffer (no tearing).
+            if (machine->ram[PRESENT_START])
+            {
+                renderer_present(machine);
+                machine->ram[PRESENT_START] = 0;
+            }
         }
 
         // A program requests a persistent save by writing a non-zero byte to
@@ -74,10 +82,10 @@ int main(const int argc, const char **argv)
         printf("Cycles per frame = %i\n", CYCLES_PER_FRAME);
         printf("Screen = %ix%i\n", SCREEN_WIDTH, SCREEN_HEIGHT);
         printf("Registers count = %i\n", REGISTERS_COUNT);
-        printf("RAM section sizes = Program:%i, VRAM:%i, Palette:%i, VMode:%i, Input:%i, SaveCtl:%i, SRAM:%i, User:%i\n",
-               PROGRAM_SIZE, VRAM_SIZE, PALETTE_SIZE, VMODE_SIZE, INPUT_SIZE, SAVECTL_SIZE, SRAM_SIZE, USER_SIZE);
-        printf("RAM start positions = Program:%i, VRAM:%i, Palette:%i, VMode:%i, Input:%i, SaveCtl:%i, SRAM:%i, User:%i\n",
-               PROGRAM_START, VRAM_START, PALETTE_START, VMODE_START, INPUT_START, SAVECTL_START, SRAM_START, USER_START);
+        printf("RAM section sizes = Program:%i, VRAM:%i, Palette:%i, VMode:%i, Input:%i, SaveCtl:%i, SRAM:%i, User:%i, Present:%i\n",
+               PROGRAM_SIZE, VRAM_SIZE, PALETTE_SIZE, VMODE_SIZE, INPUT_SIZE, SAVECTL_SIZE, SRAM_SIZE, USER_SIZE, PRESENT_SIZE);
+        printf("RAM start positions = Program:%i, VRAM:%i, Palette:%i, VMode:%i, Input:%i, SaveCtl:%i, SRAM:%i, User:%i, Present:%i\n",
+               PROGRAM_START, VRAM_START, PALETTE_START, VMODE_START, INPUT_START, SAVECTL_START, SRAM_START, USER_START, PRESENT_START);
         printf("Total RAM = %i bytes\n", RAM_SIZE);
         return 0;
     }
@@ -104,6 +112,7 @@ int main(const int argc, const char **argv)
             index = 0; // A single cartridge boots straight into the program.
         else
         {
+            renderer_reset_present(); // Menu draws live to VRAM.
             index = bootloader_run(&machine);
             if (index < 0)
                 break; // User quit the boot menu.
@@ -115,6 +124,7 @@ int main(const int argc, const char **argv)
             break;
         }
 
+        renderer_reset_present(); // Fresh program: show live VRAM until it presents.
         int halted = run_program(&machine);
         media_flush_save(&machine); // Persist final save state on exit.
 
